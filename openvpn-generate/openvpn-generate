@@ -1,0 +1,628 @@
+#!/bin/bash
+# OpenVPN config generator script version 0.1.94
+# Created by John Thomas <jthomas@rokasecurity.com>
+
+
+build_ca() {
+	PKI_DIR=$(pwd)/$COMMON_NAME
+	if [ ! -d ${PKI_DIR} ]
+	then
+		if [ "$FORCE_YES" == "no" ]
+		then
+			confirm_cn
+		fi
+			${EASYRSA} --batch --pki-dir="${PKI_DIR}" init-pki
+	fi
+	if [ ! -f ${PKI_DIR}/ca.crt ]
+	then
+		${EASYRSA} --batch --pki-dir="${PKI_DIR}" --req-cn="${COMMON_NAME}" build-ca 2>/dev/null
+		if [ $? -eq 1 ]
+		then
+			echo "CA Passphrase was incorrect, please try again"
+			rm -rf ${PKI_DIR}
+			exit 8
+		fi
+	fi
+	CA_CRT="${PKI_DIR}/ca.crt"
+	CA_KEY="${PKI_DIR}/private/ca.key"
+}
+
+confirm_cn() {
+	if ! [ "$CREATE_CONFIRM" = "c" ]
+	then
+		echo "Common name \"${COMMON_NAME}\" doesn't exist and will be created."
+		read -p "(c)onfirm, (r)etry, (q)uit?" CREATE_CONFIRM
+		local CREATE_CONFIRM=$(tr A-Z a-z <<< "$CREATE_CONFIRM")
+		case $CREATE_CONFIRM in
+			r)
+				read -p "Enter the common name: " COMMON_NAME	
+				confirm_cn
+				;;
+			q)
+				echo "Quitting."
+				exit 9
+				;;
+			*)	
+				;;
+		esac
+	fi
+	PKI_DIR=$(pwd)/$COMMON_NAME
+}
+
+build_dh() {
+	if [ ! -f ${PKI_DIR}/dh.pem ] || [ "${FORCE_YES}" = "yes" ]
+	then
+		printf "Generating DH parameters..."
+		rm -f ${PKI_DIR}/dh.pem > /dev/null 2>&1
+		${EASYRSA} --batch --pki-dir=${PKI_DIR} gen-dh > /dev/null 2>&1 &
+		spin "dh.pem"
+	else
+		local OVERWRITE="no"
+		read -p "DH parameters appear to already exist. Overwrite (y/n)?" OVERWRITE
+		OVERWRITE="$(tr A-Z a-z <<< ${OVERWRITE})"
+		if [ "${OVERWRITE}" = "y" ]
+		then
+			rm -f ${PKI_DIR}/dh.pem
+			build_dh
+		fi
+	fi
+}
+
+spin() {
+	local sp='/-\|'
+	printf ' '
+	sleep 0.1 || sleep 1
+	until [ -f ${PKI_DIR}/${1} ]
+	do
+		printf '\b%.1s' "${sp}"
+		sp=${sp#?}${sp%???}
+		sleep 0.1 || sleep 1
+	done
+	printf '\b Done.\n'
+}
+
+build_ta() {
+	if [ ! -f ${PKI_DIR}/ta.key ]
+	then
+		echo "Building TLS authentication static key..."
+		${OPENVPN} --genkey --secret ${PKI_DIR}/ta.key
+	fi
+}
+
+build_server_or_client() {
+	if [ -z "${2}" ] || [ "${2}" = "p2p" ]
+	then
+		local SERVER_OR_CLIENT="${1}"
+	else
+		local SERVER_OR_CLIENT="${1}${2}"
+	fi
+	local SERVER_OR_CLIENT_CN="${COMMON_NAME}-${SERVER_OR_CLIENT}"
+	local SERVER_OR_CLIENT_CONF_DIR="${PKI_DIR}/${SERVER_OR_CLIENT_CN}"
+	local CREATION_SUCCESSFUL=0
+	if [ -d ${PKI_DIR}/${SERVER_OR_CLIENT_CN} ] && [ "${FORCE_YES}" = "no" ]
+	then
+		local OVERWRITE="no"
+		read -p "The commom name "${SERVER_OR_CLIENT_CN}" appears to already exist. Overwrite (y/n)?" OVERWRITE
+		OVERWRITE="$(tr A-Z a-z <<< ${OVERWRITE})"
+		if ! [ "${OVERWRITE}" = "y" ]
+		then
+			CREATION_SUCCESSFUL=1
+		else
+			rm -rf ${SERVER_OR_CLIENT_CONF_DIR}
+			rm -f ${PKI_DIR}/issued/${SERVER_OR_CLIENT_CN}.crt*
+			rm -f ${PKI_DIR}/private/${SERVER_OR_CLIENT_CN}.key*
+			rm -f ${PKI_DIR}/reqs/${SERVER_OR_CLIENT_CN}.req*
+			sed -i "/${SERVER_OR_CLIENT_CN}/d" ${PKI_DIR}/index.txt
+		fi
+	else
+		rm -rf ${SERVER_OR_CLIENT_CONF_DIR}
+		rm -f ${PKI_DIR}/issued/${SERVER_OR_CLIENT_CN}.crt*
+		rm -f ${PKI_DIR}/private/${SERVER_OR_CLIENT_CN}.key*
+		rm -f ${PKI_DIR}/reqs/${SERVER_OR_CLIENT_CN}.req*
+		sed -i "/${SERVER_OR_CLIENT_CN}/d" ${PKI_DIR}/index.txt
+	fi	
+	if [ "${CREATION_SUCCESSFUL}" -eq 0 ]
+	then
+		local BUILDING="Building"
+		mkdir -p ${SERVER_OR_CLIENT_CONF_DIR}
+	else
+		local BUILDING="Skipping"
+	fi
+	echo "${BUILDING} $(tr -d 0-9 <<< ${SERVER_OR_CLIENT}) \"${SERVER_OR_CLIENT_CN}\"..."
+	local FAIL_COUNT=0
+	until [ "${CREATION_SUCCESSFUL}" -eq 1 ]
+	do
+		${EASYRSA} --pki-dir="${PKI_DIR}" build-$(tr -d 0-9 <<< ${SERVER_OR_CLIENT})-full "${SERVER_OR_CLIENT_CN}"  nopass > /dev/null 2>&1
+		local SCRIPT_SUCCESS="${?}"
+		if [ "${FAIL_COUNT}" -eq 3 ]
+		then
+			echo "Three password failures; exiting" >&2
+			exit 10
+		elif [ "${SCRIPT_SUCCESS}" -eq 0 ] 
+		then
+			CREATION_SUCCESSFUL=1
+		else
+			echo "Incorrect CA passphrase entered; try again." >&2
+			rm -f ${PKI_DIR}/reqs/${SERVER_OR_CLIENT_CN}.req*
+			rm -f ${PKI_DIR}/private/${SERVER_OR_CLIENT_CN}.key*
+			rm -f ${PKI_DIR}/issued/${SERVER_OR_CLIENT_CN}.crt*
+			sed -i "/${SERVER_OR_CLIENT_CN}/d" ${PKI_DIR}/index.txt
+			CREATION_SUCCESSFUL=0
+			let "FAIL_COUNT++"
+		fi
+	done
+	cp ${CA_CRT} ${SERVER_OR_CLIENT_CONF_DIR}
+	cp "${PKI_DIR}/issued/${SERVER_OR_CLIENT_CN}.crt" ${SERVER_OR_CLIENT_CONF_DIR}
+	cp "${PKI_DIR}/private/${SERVER_OR_CLIENT_CN}.key" ${SERVER_OR_CLIENT_CONF_DIR}
+	if [ -f "${PKI_DIR}/ta.key" ]
+	then
+		cp "${PKI_DIR}/ta.key" ${SERVER_OR_CLIENT_CONF_DIR}
+	fi
+	if [ "${1}" = "server" ]
+	then
+		restore_ca
+		if [ "${USE_EC}" = "override" ]
+		then
+			echo "Elliptic curve specified in ${DIRECTIVES_FILE}, but generating DH parameters anyway because option -3 was set" >&2
+			build_dh
+		elif [ "${USE_EC}" = "yes" ]
+		then
+			echo "Skipping DH generation (elliptic curve specified in ${DIRECTIVES_FILE} or version = 4)..."
+		else
+			build_dh
+		fi
+		if [ -f "${PKI_DIR}/dh.pem" ]
+		then
+			cp "${PKI_DIR}/dh.pem" ${SERVER_OR_CLIENT_CONF_DIR}
+		fi
+	fi
+	gen_xml ${SERVER_OR_CLIENT_CONF_DIR} "${PKI_DIR}/${SERVER_OR_CLIENT_CN}/${SERVER_OR_CLIENT_CN}.inline"
+	if [ $NUM_CLIENTS -lt 1 ]
+	then
+		local P_OR_S="p2p"
+	else
+		local P_OR_S="subnet"
+	fi
+	if [ -f "${DIRECTIVES_FILE}" ]
+	then
+		gen_directives "${SERVER_OR_CLIENT_CONF_DIR}/${SERVER_OR_CLIENT_CN}.directives" "${1}" "${P_OR_S}"
+	fi
+	touch "${SERVER_OR_CLIENT_CONF_DIR}/${SERVER_OR_CLIENT_CN}.directives"
+	if [ "${P_OR_S}" = "subnet" ] && [ "${1}" = "client" ]
+	then
+		local EXTENSION="ovpn"
+	else
+		local EXTENSION="conf"
+	fi
+	[ -z "${OUTPUT_DIR}" ] && OUTPUT_DIR="${PKI_DIR}/conf"
+	mkdir -p ${OUTPUT_DIR}
+	cat ${SERVER_OR_CLIENT_CONF_DIR}/${SERVER_OR_CLIENT_CN}.{directives,inline} > ${OUTPUT_DIR}/${SERVER_OR_CLIENT_CN}.${EXTENSION}
+
+}
+
+gen_directives() {
+	# Arguments: output_filename client/server p2p/subnet
+	local CONF_OUTPUT="${1}"
+	local CLIENT_OR_SERVER="${2}"
+	local P2P_OR_SUBNET="${3}"
+	gen_installer
+	if [ "${CLIENT_OR_SERVER}" = "server" ] || [ "${P2P_OR_SUBNET}" = "p2p" ]
+	then
+		echo "topology ${P2P_OR_SUBNET}" >> "${CONF_OUTPUT}"
+	fi
+	if [ "${CLIENT_OR_SERVER}" = "client" ]
+	then
+		echo "client" >> "${CONF_OUTPUT}"
+		echo "nobind" >> "${CONF_OUTPUT}"
+	fi
+	if [ ${VERSION} -lt 4 ]
+	then
+		if [ "${CLIENT_OR_SERVER}" = "server" ]
+		then
+			KEY_DIRECTION=0
+		else
+			KEY_DIRECTION=1
+		fi
+	elif [ "${CLIENT_OR_SERVER}" = "server" ]
+	then
+		echo "tls-server" >> "${CONF_OUTPUT}"
+	fi
+	while read line
+	do
+		case "${line}" in
+			DEV_TYPE*)
+				if [ -z "${DEV_NAME_SERVER}" ] && [ "${CLIENT_OR_SERVER}" = "server" ] || [ -z "${DEV_NAME_CLIENT}" ] && [ "${CLIENT_OR_SERVER}" = "client" ]
+				then
+					if [ -z "${DEV_TYPE}" ]
+					then
+						echo "dev tun" >> "${CONF_OUTPUT}"
+					else
+						echo "dev ${DEV_TYPE}" >> "${CONF_OUTPUT}"
+					fi
+				else
+					if [ "${CLIENT_OR_SERVER}" = "server" ]
+					then
+						if [ -z "${DEV_TYPE}" ]
+						then
+							DEV_TYPE="tun"
+						fi
+						echo "dev-type ${DEV_TYPE}" >> "${CONF_OUTPUT}"
+						echo "dev ${DEV_NAME_SERVER}" >> "${CONF_OUTPUT}"
+					elif [ "${P2P_OR_SUBNET}" = "p2p" ]
+					then
+						echo "dev-type ${DEV_TYPE}" >> "${CONF_OUTPUT}"
+						echo "dev ${DEV_NAME_CLIENT}" >> "${CONF_OUTPUT}"
+					else
+						echo "dev ${DEV_TYPE}" >> "${CONF_OUTPUT}"
+					fi	
+				fi
+				;;
+			PROTO*)
+				echo "proto ${PROTO}" >> "$1"
+				;;
+			CIPHER*)
+				echo "cipher ${CIPHER}" >> "$1"
+				;;
+			AUTH*)
+				echo "auth ${AUTH}" >> "$1"
+				;;
+			TLS_DH_CIPHER*)
+				if ! [ "${USE_EC}" = "yes" ] || [ ${VERSION} -ne 4 ]
+				then
+					echo "tls-cipher ${TLS_DH_CIPHER}" >> "$1"
+				fi
+				;;
+			PORT*)
+				echo "port ${PORT}" >> "$1"
+				;;
+			IFCONFIG*)
+				if [ "${P2P_OR_SUBNET}" = "p2p" ] && ! grep "ifconfig" "${CONF_OUTPUT}" &>/dev/null
+				then
+					case "${CLIENT_OR_SERVER}" in
+						server)
+							echo "ifconfig ${IFCONFIG_SERVER} ${IFCONFIG_CLIENT}" >> "${CONF_OUTPUT}"
+							;;
+						client)
+							echo "ifconfig ${IFCONFIG_CLIENT} ${IFCONFIG_SERVER}" >> "${CONF_OUTPUT}"
+							;;
+					esac
+				fi
+				;;
+			SERVER*)
+				if [ "${P2P_OR_SUBNET}" = "subnet" ]
+				then
+					if [ "${CLIENT_OR_SERVER}" = "server" ]
+					then
+						echo "server ${SERVER}" >> "${CONF_OUTPUT}"
+					fi
+				fi
+				;;
+			VERIFY_X509_NAMES*)	
+				if [ "${VERIFY_X509_NAMES}" = "yes" ]
+				then
+					if [ "${CLIENT_OR_SERVER}" = "server" ]
+					then
+						if [ "${P2P_OR_SUBNET}" = "p2p" ]
+						then
+							echo "verify-x509-name ${COMMON_NAME}-client name" >> "${CONF_OUTPUT}"
+						else
+							echo "verify-x509-name ${COMMON_NAME}-client name-prefix" >> "${CONF_OUTPUT}"
+						fi
+					else
+						echo "verify-x509-name ${COMMON_NAME}-server name" >> "${CONF_OUTPUT}"
+					fi
+				fi
+				;;
+			REMOTE_CERT_TLS*)
+				if [ "${REMOTE_CERT_TLS}" = "yes" ]
+				then
+					case "${CLIENT_OR_SERVER}" in
+						server)
+							echo "remote-cert-tls client" >> "${CONF_OUTPUT}"
+							;;
+						client)
+							echo "remote-cert-tls server" >> "${CONF_OUTPUT}"	
+							;;
+					esac
+				fi
+				;;
+			DROP_PRIVILEGES*)
+				if [ "${DROP_PRIVILEGES}" = "yes" ]
+				then
+					if [ "${P2P_OR_SUBNET}" = "p2p" ] || [ "${CLIENT_OR_SERVER}" = "server" ]
+					then
+						echo "persist-key" >> "${CONF_OUTPUT}"
+						echo "persist-tun" >> "${CONF_OUTPUT}"
+						echo "user ${UNPRIVILEGED_USER}" >> "${CONF_OUTPUT}"
+						echo "group ${UNPRIVILEGED_GROUP}" >> "${CONF_OUTPUT}"
+					fi
+				fi	
+				;;
+			CHROOT*)
+				if [ "${CHROOT}" = "yes" ]
+				then
+					if [ "${CLIENT_OR_SERVER}" = "server" ] || [ "${P2P_OR_SUBNET}" = "p2p" ]
+					then
+						echo "chroot ${COMMON_NAME}-jail" >> "${CONF_OUTPUT}"
+					fi
+				fi 
+				;;
+			LOG*)
+				if [ "${LOG}" = "yes" ]
+				then
+					if [ "${P2P_OR_SUBNET}" = "p2p" ] || [ "${CLIENT_OR_SERVER}" = "server" ]
+					then
+						echo "log ${COMMON_NAME}-${CLIENT_OR_SERVER}.log" >> "${CONF_OUTPUT}"
+						if ! [ -z "${VERB}" ]
+						then
+							echo "verb ${VERB}" >> "${CONF_OUTPUT}"
+						fi
+					fi
+				fi
+				;;
+			REMOTE*)
+				if [ "${CLIENT_OR_SERVER}" = "client" ]
+				then
+					echo "remote ${REMOTE}" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			KEEPALIVE*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ] || [ "${P2P_OR_SUBNET}" = "p2p" ]
+				then
+					echo "keepalive ${KEEPALIVE}" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			TLS_ELLIPTIC_CURVE*)
+				if [ "${USE_EC}" = "yes" ] && [ "${VERSION}" -eq 4 ]
+				then
+					echo "tls-cipher ${TLS_EC_CIPHER}" >> "${CONF_OUTPUT}"
+					if [ "${CLIENT_OR_SERVER}" = "server" ]	
+					then
+						echo "dh none" >> "${CONF_OUTPUT}"
+					fi
+				fi
+				;;
+			DNS*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ]	&& [ "${P2P_OR_SUBNET}" = "subnet" ]
+				then
+					awk -v servers="${DNS}" 'BEGIN { split(servers,server,","); for (i=1;i in server;i++) print "push \"dhcp-option DNS",server[i] "\""}' >> "${CONF_OUTPUT}"
+				fi
+				;;
+			DOMAIN*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ] && [ "${P2P_OR_SUBNET}" = "subnet" ] 	
+				then
+					echo "push \"dhcp-option DOMAIN ${DOMAIN}\"" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			BLOCK_CLIENT_DNS*)
+				if [ "${BLOCK_CLIENT_DNS}" = "yes" ] && [ "${CLIENT_OR_SERVER}" = "server" ] && [ "${P2P_OR_SUBNET}" = "subnet" ]
+				then
+					echo "push \"block-outside-dns\"" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			REDIRECT_GATEWAY*)
+				if [ "${REDIRECT_GATEWAY}" = "yes" ] && [ "${CLIENT_OR_SERVER}" = "server" ]
+				then
+					echo "push \"redirect-gateway def1\"" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			REDIRECT_PRIVATE*)
+				if [ "${REDIRECT_PRIVATE}" = "yes" ] && [ "${CLIENT_OR_SERVER}" = "server" ] && [ "${P2P_OR_SUBNET}" = "p2p" ]
+				then
+					echo "push \"redirect-private\"" >> "${CONF_OUTPUT}"
+				fi
+				;;
+			PUSH_ROUTES*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ]
+				then
+					awk -v routes="${ROUTES}" 'BEGIN { split(routes,route,","); for (i=1;i in route;i++) print "push \"route", route[i] "\""}' >> "${CONF_OUTPUT}"
+				fi
+				;;
+			ROUTES*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ]
+				then
+					awk -v routes="${ROUTES}" 'BEGIN { split(routes,route,","); for (i=1;i in route;i++) print "route", route[i] }' >> "${CONF_OUTPUT}"
+				fi
+				;;
+			NCP_DISABLE*)
+				if [ "${CLIENT_OR_SERVER}" = "server" ] && [ "${VERSION}" -eq 4 ] && [ "${NCP_DISABLE}" = "yes" ]
+				then
+					echo "ncp-disable" >> "${CONF_OUTPUT}"
+				fi
+				;;
+				*)
+				;;
+		esac
+	done < ${DIRECTIVES_FILE}
+	[ "${VERSION}" -ne 4 ] && echo "key-direction ${KEY_DIRECTION}" >> "${CONF_OUTPUT}"
+}
+
+gen_installer() {
+	if [ "${GEN_INSTALL}" = "yes" ]
+	then
+		cat>>${CONF_OUTPUT}<<-EOF
+		#!/bin/sh
+		#This OpenVPN configuration file contains an installer.
+		#To use the installer, run this file with sh (example: 'user@localhost:~$ sh server.conf')
+		#Additionally, you can delete all lines up to 'exit 0' to remove the installer manually.
+		JAIL_NAME=\$(grep '^chroot' "\${0}" | cut -d' ' -f2)
+		if [ ! -d /etc/openvpn/ ]
+		then
+			echo "OpenVPN must be installed first" >&2
+			exit 1
+		fi
+		if [ ! -z "\${JAIL_NAME}" ]
+		then
+			sudo mkdir -p /etc/openvpn/\${JAIL_NAME}/tmp
+			sudo chmod 1777 /etc/openvpn/\${JAIL_NAME}/tmp
+		fi
+		sudo sed -ni '/^topology/,\$p' "\${0}"
+		sudo cp "\${0}" /etc/openvpn/
+		echo "Configuration installed."
+		exit 0
+		EOF
+	fi
+}
+
+gen_xml() {
+	if [ -f ${2} ]
+	then
+		rm ${2}
+	fi
+	for file in ${1}/*{pem,crt,key}
+	do
+		tag ${file}
+		if ! [ "${TAG}" = "skip" ]
+		then
+			sed '/-BEGIN/,/-END/!d' ${file} | sed -e '1i\<'${TAG}'>' -e '$a\</'${TAG}'>' >> "${2}"
+		fi
+	done
+}
+
+tag() {
+	case "$(basename ${file})" in
+		ca.crt)
+			TAG="ca";;
+		ta.key)
+			if [ "${VERSION}" -lt 4 ]
+			then
+				TAG="tls-auth"
+			else
+				TAG="tls-crypt"
+			fi
+			;;
+		dh*.pem)
+			TAG="dh";;
+		*.crt)
+			TAG="cert";;
+		*.key)
+			TAG="key";;
+		*)
+			TAG="skip";;
+	esac
+}
+
+decrypt_ca() {
+	if [ "${INSECURE}" = "yes" ]
+	then
+		mv ${CA_KEY} ${PKI_DIR}/private/ca.key.orig >/dev/null 2>&1
+		mkdir -p /dev/shm/${COMMON_NAME} >/dev/null 2>&1
+		${OPENSSL} rsa -in ${PKI_DIR}/private/ca.key.orig -out /dev/shm/${COMMON_NAME}/ca.key > /dev/null 2>&1
+		ln -s /dev/shm/${COMMON_NAME}/ca.key ${PKI_DIR}/private/ca.key >/dev/null 2>&1
+		chmod 600 /dev/shm/${COMMON_NAME}/ca.key > /dev/null 2>&1
+	fi
+}
+
+restore_ca() {
+	if [ -f ${PKI_DIR}/private/ca.key.orig ]
+	then
+		shred -u -n 35 /dev/shm/${COMMON_NAME}/ca.key >/dev/null 2>&1
+		rm ${CA_KEY} >/dev/null 2>&1
+		rm -rf /dev/shm/${COMMON_NAME} >/dev/null 2>&1
+		mv ${PKI_DIR}/private/ca.key.orig ${CA_KEY} >/dev/null 2>&1
+	fi	
+}
+
+print_usage() {
+	echo "Usage: $(basename $0) [-3ifr] [-d directives_file] [-n clients] [-e easyrsa_script ] [ -o output_dir ] -c common_name"
+	echo "$(basename $0) -h for more information."
+}
+
+print_help() {
+	echo "Usage: $(basename $0) [-3if] [-d directives_file] [-n clients] [-e easyrsa_script ] [-o output_dir ] -c common_name"
+	echo -e "\nThis script requires OpenVPN to be installed as well as the EasyRSA script which can be obtained via git: https://github.com/OpenVPN/easy-rsa.git"
+	echo "Generates OpenVPN configs compatible with OpenVPN 2.4 by default (tls-crypt)."
+	echo -e "\n-3: Generates OpenVPN XML configs compatible with OpenVPN 2.3 (tls-auth and key-direction)."
+	echo "-f: Forces overwrite and CN confirmations to yes."
+	echo "-i: Insecure mode (CA private key will be temporarily decrypted so you only have to enter the CA password once)."
+	echo "-d: Specify a directives file in the same format as the directives.example file provided. Looks for \"directives.\$common_name\" if not specified."
+	echo "-n: Specify number of subnet client configs to generate, or 0 to generate a p2p client. Defaults to p2p if not specified."
+	echo "  If common_name already exists, -n will create more subnet clients if some already exist."
+	echo "-e: Specify location of easyrsa script. Defaults to current directory if not specified."
+	echo "-o: Specify output location of completed config files. Defaults to ./\$common_name/conf if not specified. "
+	echo "-r: Generate an installer script at the top of the output files."
+}
+
+trap 'restore_ca; exit 254' INT HUP TERM
+
+while getopts 3c:d:e:fihn:o:r opt
+do
+	case "$opt" in
+		c)
+			COMMON_NAME=$OPTARG;;
+		3)
+			VERSION="3";;
+		f)
+			FORCE_YES="yes";;
+		i)
+			INSECURE="yes";;
+		n)
+			NUM_CLIENTS=$OPTARG;;
+		h)
+			print_help
+			exit 1
+			;;
+		d)
+			DIRECTIVES_FILE=$OPTARG;;
+		e)
+			EASYRSA=$OPTARG;;
+		o)
+			OUTPUT_DIR="$OPTARG";;
+		r)
+			GEN_INSTALL="yes";;
+		*)
+			echo "unknown argument $opt"
+			print_usage
+			exit 1
+			;;
+	esac
+done
+
+[ -z "${COMMON_NAME}" ] && print_usage && exit 1
+[ -z "${VERSION}" ] && VERSION="4"
+[ -z "${FORCE_YES}" ] && FORCE_YES="no"
+[ -z "${INSECURE}" ] && INSECURE="no"
+[ -z "${NUM_CLIENTS}" ] && NUM_CLIENTS="0"
+[ -z "${DIRECTIVES_FILE}" ] && DIRECTIVES_FILE="directives.${COMMON_NAME}"
+[ -z "${EASYRSA}" ] && EASYRSA="$(pwd)/easyrsa"
+[ -z "${GEN_INSTALL}" ] && GEN_INSTALL="no"
+[ ! -f "${EASYRSA}" ] && printf "Can't find EasyRSA script!\nEither specify location with -e, or run $(basename $0) from the same directory as the EasyRSA script.\n" >&2 && exit 5
+[ -f "${DIRECTIVES_FILE}" ] && USE_EC="$(grep '^TLS_ELLIPTIC_CURVE' ${DIRECTIVES_FILE} | cut -d'"' -f2)"
+[ -z "${USE_EC}" ] && [ ${VERSION} -eq 4 ] && USE_EC="yes"
+[ "${VERSION}" -ne 4 ] && [ "${USE_EC}" = "yes" ] && USE_EC="override"
+[ -f $(which openvpn) ] && OPENVPN="$(which openvpn)" || (echo "OpenVPN must be installed to use this script." >&2 && exit 6)
+[ -f $(which openssl) ] && OPENSSL="$(which openssl)" || (echo "OpenSSL must be installed to use this script." >&2 && exit 7)
+build_ca
+build_ta
+decrypt_ca
+[ ! -f "${DIRECTIVES_FILE}" ] && echo "No directives file found, skipping directives..."
+if [ -f "${DIRECTIVES_FILE}" ]
+then
+	source "${DIRECTIVES_FILE}"
+	if grep "GCM"<<<${CIPHER} &>/dev/null && [ "${VERSION}" -ne 4 ]
+	then
+		CIPHER=$(sed 's/GCM/CBC/g'<<<${CIPHER})
+		echo "GCM cipher was specified in ${DIRECTIVES_FILE}, but changing to CBC cipher because option -3 was set" >&2
+	fi
+fi
+
+if [ "${NUM_CLIENTS}" -lt 1 ] 
+then
+	build_server_or_client client
+else
+	if [ -f ${PKI_DIR}/client.count ]
+	then
+		FORCE_YES="no" # Don't want to overwrite server accidentally
+		STARTSEQ=$(cat ${PKI_DIR}/client.count)
+	else
+		STARTSEQ=1
+	fi
+	for client in $(seq ${STARTSEQ} $(($NUM_CLIENTS+$STARTSEQ-1)) )
+	do
+		build_server_or_client client $client
+		echo $((client + 1)) > ${PKI_DIR}/client.count
+	done
+fi
+build_server_or_client server
+restore_ca
+echo -e "\nConfiguration files are available in ${OUTPUT_DIR}"

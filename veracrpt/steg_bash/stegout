@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Usage -- Make sure to chmod +x stegout
+# Type in the terminal -- ./stegout 
+# This script will only work in a linux or mac system. The program will create a new file on your Desktop and at your chose it 
+# will delete the original files unstegged files. It is recommended to compile your files on your desktop in the same folder of the
+# script.
+
+# steg=$1
+
+read -p "Name of the stegged file. (Example: stegged.filename): " steg
+if [ "$steg" = "" ]; then
+    break
+fi
+
+mv $steg output.zip
+unzip output.zip
+
+read -p "Do you want to delete the original file? (y/n)" answer
+case $answer in
+  y)
+    rm $steg
+	rm output.zip
+    ;;
+  n)
+    continue
+    ;;
+  *)
+    ;;
+esac
+
+echo " Your file is located in the same place you executed the scripted"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=keepass
+GenericName=Password Vault
+Categories=productivity;
+Exec=keepassxc
+Icon=password

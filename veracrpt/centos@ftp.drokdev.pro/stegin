@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# usage -- Make sure to chmod +x stegin
+# Type in the terminal -- ./stegin 
+# This script will only work in a linux or mac system. The program will create a new file on your Desktop and at your chose it 
+# will delete the original files unstegged files. It is recommended to compile your files on your desktop in the same folder of the
+# script.
+
+# shell=$1
+# hide=$2
+# steg=$3
+
+read -p "Path to the file you are hidding your file into. (Example: ~/path/to/vid.mp4): " shell
+if [ "$shell" = "" ]; then
+    break
+fi
+
+read -p "Path to the file you are hidding. (Example: ~/path/to/hide.filename): " hide
+if [ "$hide" = "" ]; then
+    break
+fi
+
+read -p "Name of the stegged file. Be sure the file extendion matches the vid or img file extendion. (Example: stegged.filename): " steg
+if [ "$steg" = "" ]; then
+    break
+fi
+
+mkdir ~/Desktop/steg
+cp $shell ~/Desktop/steg
+cp $hide ~/Desktop/steg
+rm $shell
+rm $hide
+cd ~/Desktop/steg
+zip output.zip $hide
+cat $shell output.zip >> $steg
+sleep 5
+cp $steg ~/Desktop
+
+echo " Your file $steg is located on your Desktop"
+
+read -p "Do you want to delete your original files? (y/n)" answer
+case $answer in
+  y)
+    rm -rf ~/Desktop/steg
+    ;;
+  n)
+    continue
+    ;;
+  *)
+    ;;
+esac
+
+
+

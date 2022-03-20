@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=joplin
+GenericName=Text Editer
+Categories=editer;
+Exec=joplin-james-carroll.joplin
+Icon=gtg-note-new

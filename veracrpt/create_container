@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+veracrypt -t -c --volume-type=normal /dev/sdb1 --encryption=aes --hash=sha-512 --filesystem=ext4 -p STRONGP@33WORD --pim=0 -k "" --random-source=/dev/urandom
+
+
+ovs-vsctl add-br vmbr10 \
+-- set bridge vmbr0 other-config:datapath-id=0000000000000001 \
+-- add-port vmbr0 p1 -- set interface p1 ofport_request=1 \
+-- set-controller vmbr0 tcp:127.0.0.1:6653 \
+-- set controller vmbr0 connection-mode=out-of-band

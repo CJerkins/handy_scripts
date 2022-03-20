@@ -1,0 +1,51 @@
+#! /bin/bash
+
+# usage run command with ./mkpy <project name>
+# mkpy will then create a directory with a virtual environment
+# and setup git for your new project
+
+# mkpy requires python 3.4+, git, and vscode to be installed
+# if you do not want to use vscode simply remove the last line 
+
+# user specific settings, change these for your purposes
+user="username"
+git_server="gitlab.example.com"
+
+# create project directory
+mkdir $1
+cd $1
+echo ".venv/" > .gitignore
+mkdir src
+echo "# $1" > README.md
+
+# setup git
+git init
+git add .
+git remote add origin git@$git_server:$user/$1.git
+
+# create venv and requirements.txt - installs linters
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pylint
+pip install flake8
+pip freeze > requirements.txt
+deactivate
+
+# if django project setup django 
+if [ $2 = "--django" ]
+then
+  source .venv/bin/activate
+  pip install django
+  django-admin startproject $1
+  mv $1/* src/
+  rm -rf $1
+  pip freeze > requirements.txt
+  deactivate
+fi
+
+# commit and push new project to gitlab
+git commit -m "initial commit"
+git push -u origin master
+
+# open project in vscode
+code .
